@@ -1,57 +1,39 @@
 [Dify]
-enable = true
-
-api-key = "" # Dify的API Key
-base-url = "" # Dify API接口base url
-
-commands = ["ai", "dify", "聊天", "AI"]
+enable = true          # 是否启用插件
+default-model = "学姐"  # 默认使用的模型
+commands = ["聊天", "AI"]
+chatroom_enable = false  # 是否启用聊天室功能：
+                        # true - 用户@机器人后会自动进入聊天室，之后无需@即可聊天
+                        # false - 每次对话都需要@或使用触发词，不会进入持续聊天模式
 command-tip = """-----XYBot-----
 💬AI聊天指令：
-聊天 请求内容"""
+1. 切换模型（将会一直保持到下次切换）：
+   - @学姐 切换：切换到学姐模型
+   - @老夏 切换：切换到老夏模型
+2. 临时使用其他模型：
+   - 学姐 消息内容：临时使用学姐模型
+   - 老夏 消息内容：临时使用老夏模型"""
+admin_ignore = true            # 管理员是否免积分，设为true则管理员不消耗积分使用AI
+whitelist_ignore = true        # 白名单用户是否免积分，设为true则白名单用户不消耗积分
+http-proxy = ""                # HTTP代理配置，格式为"http://代理地址:端口"，不需要则留空
+voice_reply_all = false        # 是否总是使用语音回复，设为true则所有回复都转为语音消息
+robot-names = ["毛球", "DifyBot", "智能助手"]
+# 音频转文本和文本转音频 URL 将基于各模型的 base-url 自动构建
 
-price = 0 # 用一次扣积分，如果0则不扣
-admin_ignore = true # admin是否忽略扣除
-whitelist_ignore = true # 白名单是否忽略扣除
+[Dify.models]
+# 学姐模型配置
+[Dify.models."学姐"]
+api-key = "app-9hiqqQIi8bZfvmaFc56WPyYH"
+base-url = "http://192.168.6.19:8080/v1"
+trigger-words = ["@学姐"]
+wakeup-words = ["学姐"]
+price = 0
 
-# Http代理设置
-# 格式: http://用户名:密码@代理地址:代理端口
-# 例如：http://127.0.0.1:7890
-http-proxy = ""
+# 老夏模型配置
+[Dify.models."老夏"]
+api-key = "app-hC8IG2ab6QKxvG0ElokVANBK"
+base-url = "http://192.168.6.19:8080/v1"
+trigger-words = ["@老夏"]
+wakeup-words = ["老夏"]
+price = 0
 
-# 语音输出设置
-tts-enable = false # 语音输出开关: true为语音模式,false为文字模式
-tts-voice = 6 # 语音音色ID
-tts-type = "baidu" # 语音类型: baidu或xunfei
-
-# 语音类型和音色说明:
-# 百度语音(type=baidu):
-# 1: 度逍遥-磁性男声
-# 2: 度博文-情感男声
-# 3: 度小贤-情感男声
-# 4: 度小鹿-甜美女声
-# 5: 度灵儿-清澈女声
-# 6: 度小乔-情感女声
-# 7: 度小雯-成熟女声
-# 8: 度米朵-可爱女童
-#
-# 讯飞语音(type=xunfei):
-# 1: 讯飞-七哥（男声）
-# 2: 讯飞-子晴（女声）
-# 3: 讯飞-一菲（女声）
-# 4: 讯飞-小露（女声）
-# 5: 讯飞-小鹏（男声）
-# 6: 讯飞-萌小新（男声）
-# 7: 讯飞-小雪（女声）
-# 8: 讯飞-超哥（男声）
-# 9: 讯飞-小媛（女声）
-# 10: 讯飞-叶子（女声）
-# 11: 讯飞-千雪（女声）
-# 12: 讯飞-小忠（男声）
-# 13: 讯飞-万叔（男声）
-# 14: 讯飞-虫虫（女声）
-# 15: 讯飞-楠楠（儿童-男）
-# 16: 讯飞-晓璇（女声）
-# 17: 讯飞-芳芳（儿童-女）
-# 18: 讯飞-嘉嘉（女声）
-# 19: 讯飞-小倩（女声）
-# 20: 讯飞-Catherine（女声-英文专用）
