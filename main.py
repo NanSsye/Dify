@@ -707,6 +707,7 @@ class Dify(PluginBase):
 
                 file_id = await self.upload_file_to_dify(
                     image_content,
+                    f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
                     "image/jpeg",
                     group_id,
                     model_config=model_config  # 传递正确的模型配置
@@ -890,6 +891,7 @@ class Dify(PluginBase):
                 logger.debug("@消息中发现最近的图片，准备上传到 Dify")
                 file_id = await self.upload_file_to_dify(
                     image_content,
+                    f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
                     "image/jpeg",
                     group_id,
                     model_config=model  # 传递正确的模型配置
@@ -969,6 +971,7 @@ class Dify(PluginBase):
                         logger.debug("引用消息中发现最近的图片，准备上传到 Dify")
                         file_id = await self.upload_file_to_dify(
                             image_content,
+                            f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
                             "image/jpeg",
                             group_id,
                             model_config=model
@@ -1022,6 +1025,7 @@ class Dify(PluginBase):
                     logger.debug("引用消息中发现最近的图片，准备上传到 Dify")
                     file_id = await self.upload_file_to_dify(
                         image_content,
+                        f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
                         "image/jpeg",
                         message["FromWxid"],
                         model_config=model
