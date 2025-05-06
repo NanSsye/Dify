@@ -4,7 +4,8 @@
 
 Dify 插件是为 XYBotV2 机器人框架设计的一个插件，它允许机器人与 Dify (一个 LLM 应用开发平台) 进行交互。通过这个插件，你可以让你的微信机器人具备强大的自然语言处理能力，例如文本生成、对话、语音处理和文件处理等。🚀
 
-<img src="https://github.com/user-attachments/assets/d4438a2f-07bb-4a69-9286-dde96245df05" width="400" height="600">
+<img src="![cc29510adbb76b857679879670a18f1](https://github.com/user-attachments/assets/dbdd378a-6298-45f2-b648-e448f816c61e)
+" width="400" height="600">
 
 ## 特性
 
