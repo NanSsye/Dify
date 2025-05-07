@@ -62,7 +62,7 @@ class ModelConfig:
 class Dify(PluginBase):
     description = "Dify插件"
     author = "老夏的金库"
-    version = "1.4.0"  # 更新版本号 - 移除聊天室功能
+    version = "1.4.1"  # 更新版本号 - 移除聊天室功能
     is_ai_platform = True  # 标记为 AI 平台插件
 
     def __init__(self):
@@ -122,6 +122,8 @@ class Dify(PluginBase):
         self.files_dir = "files"
         # 创建文件存储目录
         os.makedirs(self.files_dir, exist_ok=True)
+        # 创建临时文件目录
+        os.makedirs("temp", exist_ok=True)
 
         # 添加Agent模式相关属性
         self.current_agent_thoughts = {}  # 存储当前Agent思考过程，格式: {conversation_id: [thought1, thought2, ...]}
@@ -432,10 +434,10 @@ class Dify(PluginBase):
                         query = content[len(at_bot_prefix):].strip()
                         logger.debug(f"移除@{at_bot_prefix}后的查询内容: {query}")
                     else:
-                        # 如果不是@机器人，则尝试找空格
+                        # 如果不是@机器人，则尝试找第一个空格
                         space_index = content.find(' ')
                         if space_index > 0:
-                            # 只保留空格后面的内容
+                            # 保留第一个空格后面的所有内容
                             query = content[space_index+1:].strip()
                             logger.debug(f"移除@前缀后的查询内容: {query}")
                         else:
@@ -503,10 +505,10 @@ class Dify(PluginBase):
                 query = content[len(at_bot_prefix):].strip()
                 logger.debug(f"移除@{at_bot_prefix}后的查询内容: {query}")
             else:
-                # 如果不是@机器人，则尝试找空格
+                # 如果不是@机器人，则尝试找第一个空格
                 space_index = content.find(' ')
                 if space_index > 0:
-                    # 只保留空格后面的内容
+                    # 保留第一个空格后面的所有内容
                     query = content[space_index+1:].strip()
                     logger.debug(f"移除@前缀后的查询内容: {query}")
                 else:
@@ -631,10 +633,10 @@ class Dify(PluginBase):
                         query = content[len(at_bot_prefix):].strip()
                         logger.debug(f"移除@{at_bot_prefix}后的查询内容: {query}")
                     else:
-                        # 如果不是@机器人，则尝试找空格
+                        # 如果不是@机器人，则尝试找第一个空格
                         space_index = content.find(' ')
                         if space_index > 0:
-                            # 只保留空格后面的内容
+                            # 保留第一个空格后面的所有内容
                             query = content[space_index+1:].strip()
                             logger.debug(f"移除@前缀后的查询内容: {query}")
                         else:
@@ -959,9 +961,17 @@ class Dify(PluginBase):
         try:
             logger.debug(f"开始调用 Dify API - 用户消息: {processed_query}")
             logger.debug(f"文件列表: {formatted_files}")
-            conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
 
+            # 使用发送者的wxid而不是群聊id来获取和存储会话ID
             user_wxid = message["SenderWxid"]
+            # 对于群聊消息，使用发送者的wxid作为会话ID的key
+            if message["IsGroup"]:
+                logger.debug(f"群聊消息，使用发送者wxid '{user_wxid}' 获取会话ID")
+                conversation_id = self.db.get_llm_thread_id(user_wxid, namespace="dify")
+            else:
+                # 私聊消息，使用原来的FromWxid
+                conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
+
             try:
                 user_username = await bot.get_nickname(user_wxid) or "未知用户"
             except:
@@ -978,7 +988,7 @@ class Dify(PluginBase):
                 "query": processed_query,
                 "response_mode": "streaming",  # 始终使用流式响应
                 "conversation_id": conversation_id,
-                "user": message["FromWxid"],
+                "user": user_wxid,  # 使用发送者的wxid而不是群聊id
                 "files": formatted_files,
                 "auto_generate_name": False,
             }
@@ -1014,7 +1024,14 @@ class Dify(PluginBase):
                         ai_resp = api_response.get("data", {}).get("answer", "")
                         new_con_id = api_response.get("data", {}).get("conversation_id", "")
                         if new_con_id and new_con_id != conversation_id:
-                            self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
+                            # 根据消息类型选择正确的ID来保存会话ID
+                            if message["IsGroup"]:
+                                # 群聊消息，使用发送者的wxid
+                                self.db.save_llm_thread_id(message["SenderWxid"], new_con_id, "dify")
+                                logger.debug(f"群聊消息，保存会话ID到发送者wxid: {message['SenderWxid']}")
+                            else:
+                                # 私聊消息，使用原来的FromWxid
+                                self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
 
                         # 过滤掉思考标签
                         think_pattern = r'<think>.*?</think>'
@@ -1022,7 +1039,13 @@ class Dify(PluginBase):
                         logger.debug(f"API代理返回(过滤思考标签后): {ai_resp[:100]}...")
 
                         if ai_resp:
-                            await self.dify_handle_text(bot, message, ai_resp, model)
+                            # 获取消息ID，如果有的话
+                            message_id = api_response.get("data", {}).get("message_id")
+                            if message_id:
+                                logger.debug(f"API代理返回消息ID: {message_id}")
+                                await self.dify_handle_text(bot, message, ai_resp, model, message_id=message_id)
+                            else:
+                                await self.dify_handle_text(bot, message, ai_resp, model)
                         else:
                             logger.warning("API代理未返回有效响应")
                             # 回退到直接调用
@@ -1129,7 +1152,14 @@ class Dify(PluginBase):
 
                             new_con_id = resp_json.get("conversation_id", "")
                             if new_con_id and new_con_id != conversation_id:
-                                self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
+                                # 根据消息类型选择正确的ID来保存会话ID
+                                if message["IsGroup"]:
+                                    # 群聊消息，使用发送者的wxid
+                                    self.db.save_llm_thread_id(message["SenderWxid"], new_con_id, "dify")
+                                    logger.debug(f"群聊消息，保存会话ID到发送者wxid: {message['SenderWxid']}")
+                                else:
+                                    # 私聊消息，使用原来的FromWxid
+                                    self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
                             ai_resp = ai_resp.rstrip()
 
                             # 最后再次过滤思考标签，确保完全移除
@@ -1138,7 +1168,14 @@ class Dify(PluginBase):
                             logger.debug(f"Dify响应(过滤思考标签后): {ai_resp[:100]}...")
                         elif resp.status == 404:
                             logger.warning("会话ID不存在，重置会话ID并重试")
-                            self.db.save_llm_thread_id(message["FromWxid"], "", "dify")
+                            # 根据消息类型选择正确的ID来重置会话ID
+                            if message["IsGroup"]:
+                                # 群聊消息，使用发送者的wxid
+                                self.db.save_llm_thread_id(message["SenderWxid"], "", "dify")
+                                logger.debug(f"群聊消息，重置会话ID，发送者wxid: {message['SenderWxid']}")
+                            else:
+                                # 私聊消息，使用原来的FromWxid
+                                self.db.save_llm_thread_id(message["FromWxid"], "", "dify")
                             # 重要：在递归调用时必须传递原始模型，不要重新选择
                             return await self.dify(bot, message, processed_query, files=files, specific_model=model)
                         elif resp.status == 400:
@@ -1149,7 +1186,13 @@ class Dify(PluginBase):
                             return await self.handle_other_status(bot, message, resp)
 
                 if ai_resp:
-                    await self.dify_handle_text(bot, message, ai_resp, model)
+                    # 获取消息ID，如果有的话
+                    message_id = resp_json.get("message_id")
+                    if message_id:
+                        logger.debug(f"Dify API返回消息ID: {message_id}")
+                        await self.dify_handle_text(bot, message, ai_resp, model, message_id=message_id)
+                    else:
+                        await self.dify_handle_text(bot, message, ai_resp, model)
                 else:
                     logger.warning("Dify未返回有效响应")
         except Exception as e:
@@ -1392,7 +1435,17 @@ class Dify(PluginBase):
             logger.error(traceback.format_exc())
             return None
 
-    async def dify_handle_text(self, bot: WechatAPIClient, message: dict, text: str, model_config=None):
+    async def dify_handle_text(self, bot: WechatAPIClient, message: dict, text: str, model_config=None, message_id=None):
+        """
+        处理Dify返回的文本消息
+
+        Args:
+            bot: WechatAPIClient实例
+            message: 消息字典
+            text: 要处理的文本内容
+            model_config: 模型配置（可选）
+            message_id: Dify生成的消息ID（可选，用于文本转语音）
+        """
         # 使用传入的model_config，如果没有则使用默认模型
         model = model_config or self.current_model
 
@@ -1402,7 +1455,14 @@ class Dify(PluginBase):
         logger.debug(f"过滤思考标签后的文本: {text[:100]}...")
 
         # 获取会话ID，用于查找Agent思考过程
-        conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
+        # 根据消息类型选择正确的ID来获取会话ID
+        if message["IsGroup"]:
+            # 群聊消息，使用发送者的wxid
+            conversation_id = self.db.get_llm_thread_id(message["SenderWxid"], namespace="dify")
+            logger.debug(f"群聊消息，从发送者wxid获取会话ID: {message['SenderWxid']}")
+        else:
+            # 私聊消息，使用原来的FromWxid
+            conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
 
         # 如果启用了Agent模式且有思考过程，可以在这里处理
         if self.support_agent_mode and conversation_id in self.current_agent_thoughts:
@@ -1422,90 +1482,216 @@ class Dify(PluginBase):
                 # 清除已处理的思考过程
                 self.current_agent_thoughts[conversation_id] = []
 
-        # 匹配Dify返回的图片引用格式
-        image_pattern = r'\[(.*?)\]\((.*?)\)'
-        matches = re.findall(image_pattern, text)
+        # 匹配Dify返回的Markdown链接格式 [文件名](URL)
+        link_pattern = r'\[(.*?)\]\((.*?)\)'
+        matches = re.findall(link_pattern, text)
 
-        # 移除所有图片引用文本
-        text = re.sub(image_pattern, '', text)
+        # 记录所有找到的链接
+        if matches:
+            logger.info(f"[文件处理] 在回复中找到 {len(matches)} 个文件链接")
+            for i, (filename, url) in enumerate(matches):
+                logger.info(f"[文件处理] 链接 {i+1}: 文件名='{filename}', URL='{url}'")
+
+        # 移除所有链接文本，以免重复显示
+        text = re.sub(link_pattern, '', text)
 
         # 先发送文字内容
         if text:
             if message["MsgType"] == 34 or self.voice_reply_all:
-                await self.text_to_voice_message(bot, message, text)
+                # 获取消息ID，如果有的话
+                message_id = None
+                if self.support_agent_mode and conversation_id in self.current_agent_thoughts:
+                    thoughts = self.current_agent_thoughts[conversation_id]
+                    if thoughts and thoughts[-1].get("message_id"):
+                        message_id = thoughts[-1].get("message_id")
+                        logger.debug(f"找到Agent消息ID: {message_id}，将用于文本转语音")
+
+                # 使用message_id或text调用文本转语音
+                await self.text_to_voice_message(bot, message, text=text, message_id=message_id)
             else:
                 paragraphs = text.split("//n")
                 for paragraph in paragraphs:
                     if paragraph.strip():
                         await bot.send_text_message(message["FromWxid"], paragraph.strip())
 
-        # 如果有图片引用，只处理最后一个
-        if matches:
-            filename, url = matches[-1]  # 只取最后一个图片
+        # 处理所有找到的链接
+        for filename, url in matches:
             try:
                 # 如果URL是相对路径,添加base_url
-                if url.startswith('/files'):
+                if url.startswith('/files') or url.startswith('./files'):
                     # 移除base_url中可能的v1路径
                     base_url = model.base_url.replace('/v1', '')
+                    if url.startswith('./'):
+                        url = url[1:]  # 移除开头的点
                     url = f"{base_url}{url}"
 
-                logger.debug(f"处理图片链接: {url}")
+                logger.info(f"[文件处理] 开始下载文件: {filename}, URL: {url}")
+
+                # 设置请求头
                 headers = {"Authorization": f"Bearer {model.api_key}"}
+
+                # 下载文件
                 async with aiohttp.ClientSession(proxy=self.http_proxy) as session:
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 200:
-                            image_data = await resp.read()
-                            await bot.send_image_message(message["FromWxid"], image_data)
+                            # 获取内容类型
+                            content_type = resp.headers.get('Content-Type', '')
+                            logger.info(f"[文件处理] 下载成功: 状态码={resp.status}, 内容类型={content_type}")
+
+                            # 读取文件内容
+                            file_content = await resp.read()
+                            logger.info(f"[文件处理] 文件大小: {len(file_content)} 字节")
+
+                            # 保存一份用于调试
+                            debug_file = f"debug_file_{int(time.time())}_{os.path.basename(url)}"
+                            try:
+                                with open(debug_file, "wb") as f:
+                                    f.write(file_content)
+                                logger.info(f"[文件处理] 已保存调试文件: {debug_file}")
+                            except Exception as save_error:
+                                logger.error(f"[文件处理] 保存调试文件失败: {save_error}")
+
+                            # 根据内容类型或文件扩展名确定文件类型
+                            file_type = None
+
+                            # 首先尝试使用文件内容检测类型
+                            kind = filetype.guess(file_content)
+                            if kind:
+                                file_type = kind.mime
+                                ext = kind.extension
+                                logger.info(f"[文件处理] 通过内容检测到文件类型: {file_type}, 扩展名: {ext}")
+                            else:
+                                # 尝试从Content-Type头获取
+                                if content_type and content_type != 'application/octet-stream':
+                                    file_type = content_type
+                                    ext = mimetypes.guess_extension(content_type)
+                                    if ext:
+                                        ext = ext.lstrip('.')
+                                    else:
+                                        ext = ""
+                                    logger.info(f"[文件处理] 从Content-Type获取文件类型: {file_type}, 扩展名: {ext}")
+                                else:
+                                    # 尝试从文件名获取扩展名
+                                    ext = os.path.splitext(filename)[1].lower().lstrip('.')
+                                    if not ext and '.' in url:
+                                        ext = os.path.splitext(url)[1].lower().lstrip('.')
+
+                                    if ext:
+                                        file_type = mimetypes.guess_type(f"file.{ext}")[0]
+                                        logger.info(f"[文件处理] 从文件名获取类型: {file_type}, 扩展名: {ext}")
+                                    else:
+                                        # 无法确定类型
+                                        file_type = 'application/octet-stream'
+                                        ext = 'bin'
+                                        logger.warning(f"[文件处理] 无法确定文件类型，使用默认值: {file_type}")
+
+                            # 创建临时目录用于处理文件
+                            temp_dir = os.path.join(os.getcwd(), "temp")
+                            os.makedirs(temp_dir, exist_ok=True)
+                            temp_filename = os.path.join(temp_dir, f"{int(time.time())}_{filename}")
+
+                            try:
+                                # 保存临时文件
+                                with open(temp_filename, "wb") as f:
+                                    f.write(file_content)
+                                logger.debug(f"[文件处理] 已保存临时文件: {temp_filename}")
+
+                                # 根据文件类型发送不同类型的消息
+                                if file_type and (file_type.startswith('audio/') or ext in ('wav', 'mp3', 'ogg', 'm4a', 'amr')):
+                                    # 音频文件
+                                    logger.info(f"[文件处理] 检测到音频文件，发送语音消息")
+
+                                    # 对于音频文件，可能需要转换格式
+                                    try:
+                                        # 检查是否有ffmpeg
+                                        if shutil.which("ffmpeg"):
+                                            # 转换为mp3格式，这是微信支持较好的格式
+                                            mp3_file = f"{temp_filename}.mp3"
+                                            command = f'ffmpeg -y -i "{temp_filename}" -acodec libmp3lame -ar 44100 -ab 192k "{mp3_file}"'
+                                            logger.debug(f"[文件处理] 执行音频转换命令: {command}")
+
+                                            process = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+                                            if process.returncode == 0:
+                                                logger.info(f"[文件处理] 音频转换成功: {mp3_file}")
+
+                                                # 读取转换后的文件
+                                                with open(mp3_file, "rb") as f:
+                                                    converted_audio = f.read()
+
+                                                # 发送转换后的音频
+                                                await bot.send_voice_message(message["FromWxid"], voice=converted_audio, format="mp3")
+                                                logger.info(f"[文件处理] 发送转换后的语音消息成功")
+
+                                                # 删除转换后的文件
+                                                try:
+                                                    os.remove(mp3_file)
+                                                    logger.debug(f"[文件处理] 已删除转换后的音频文件: {mp3_file}")
+                                                except Exception as del_error:
+                                                    logger.debug(f"[文件处理] 删除转换后的音频文件失败: {del_error}")
+                                            else:
+                                                logger.warning(f"[文件处理] 音频转换失败: {process.stderr}")
+                                                # 尝试直接发送原始音频
+                                                await bot.send_voice_message(message["FromWxid"], voice=file_content, format=ext or 'mp3')
+                                                logger.info(f"[文件处理] 发送原始语音消息成功")
+                                        else:
+                                            logger.warning("[文件处理] 未找到ffmpeg，直接发送原始音频")
+                                            await bot.send_voice_message(message["FromWxid"], voice=file_content, format=ext or 'mp3')
+                                            logger.info(f"[文件处理] 发送原始语音消息成功")
+                                    except Exception as audio_error:
+                                        logger.error(f"[文件处理] 处理音频文件失败: {audio_error}")
+                                        logger.error(traceback.format_exc())
+                                        # 尝试直接发送原始音频
+                                        await bot.send_voice_message(message["FromWxid"], voice=file_content, format=ext or 'mp3')
+                                        logger.info(f"[文件处理] 尝试直接发送原始语音消息")
+
+                                elif file_type and (file_type.startswith('image/') or ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg')):
+                                    # 图片文件
+                                    logger.info(f"[文件处理] 检测到图片文件，发送图片消息")
+                                    await bot.send_image_message(message["FromWxid"], file_content)
+                                    logger.info(f"[文件处理] 发送图片消息成功")
+
+                                elif file_type and (file_type.startswith('video/') or ext in ('mp4', 'avi', 'mov', 'mkv', 'flv', 'webm')):
+                                    # 视频文件
+                                    logger.info(f"[文件处理] 检测到视频文件，发送视频消息")
+                                    await bot.send_video_message(message["FromWxid"], video=file_content, image="None")
+                                    logger.info(f"[文件处理] 发送视频消息成功")
+
+                                else:
+                                    # 其他类型文件，不做处理
+                                    logger.info(f"[文件处理] 检测到其他类型文件: {file_type}，不做处理")
+
+                            except Exception as e:
+                                logger.error(f"[文件处理] 处理文件失败: {e}")
+                                logger.error(traceback.format_exc())
+
+                            finally:
+                                # 无论成功与否，都删除临时文件
+                                try:
+                                    if os.path.exists(temp_filename):
+                                        os.remove(temp_filename)
+                                        logger.debug(f"[文件处理] 已删除临时文件: {temp_filename}")
+                                except Exception as del_error:
+                                    logger.debug(f"[文件处理] 删除临时文件失败: {del_error}")
                         else:
-                            logger.error(f"下载图片失败: HTTP {resp.status}")
-                            await bot.send_text_message(message["FromWxid"], f"下载图片失败: HTTP {resp.status}")
+                            error_text = await resp.text()
+                            logger.error(f"[文件处理] 下载失败: 状态码={resp.status}, 错误={error_text}")
             except Exception as e:
-                logger.error(f"处理图片 {url} 失败: {e}")
-                await bot.send_text_message(message["FromWxid"], f"处理图片失败: {str(e)}")
-
-        # 处理其他类型的链接
-        pattern = r"\]$$(https?:\/\/[^\s$$]+)\)"
-        links = re.findall(pattern, text)
-        for url in links:
-            try:
-                file_content = await self.download_file(url)
-                if file_content:
-                    # 检测文件类型
-                    kind = filetype.guess(file_content)
-                    if kind is None:
-                        # 如果无法检测文件类型，尝试从URL获取
-                        ext = os.path.splitext(url)[1].lower().lstrip('.')
-                        if not ext:
-                            logger.warning(f"无法识别文件类型: {url}")
-                            continue
-                    else:
-                        ext = kind.extension
-
-                    # 根据文件类型发送不同类型的消息
-                    if ext in ('wav', 'mp3', 'ogg', 'm4a'):
-                        await bot.send_voice_message(message["FromWxid"], voice=file_content, format=ext)
-                        logger.info(f"发送语音消息成功，大小: {len(file_content)} 字节")
-                    elif ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg'):
-                        await bot.send_image_message(message["FromWxid"], file_content)
-                        logger.info(f"发送图片消息成功，大小: {len(file_content)} 字节")
-                    elif ext in ('mp4', 'avi', 'mov', 'mkv', 'flv'):
-                        await bot.send_video_message(message["FromWxid"], video=file_content, image="None")
-                        logger.info(f"发送视频消息成功，大小: {len(file_content)} 字节")
-                    else:
-                        # 其他类型文件，发送文本通知
-                        file_name = os.path.basename(url)
-                        await bot.send_text_message(message["FromWxid"], f"下载了文件: {file_name}\n类型: {ext}\n大小: {len(file_content)/1024:.2f} KB")
-                        logger.info(f"发送文件通知成功，文件名: {file_name}, 类型: {ext}, 大小: {len(file_content)} 字节")
-            except Exception as e:
-                logger.error(f"处理链接文件 {url} 失败: {e}")
+                logger.error(f"[文件处理] 处理文件链接失败: {e}")
                 logger.error(traceback.format_exc())
-                await bot.send_text_message(message["FromWxid"], f"下载文件 {url} 失败")
 
-        # 识别普通文件链接
+        # 处理可能的其他格式链接 - 由于我们已经处理了标准格式的链接，这部分可以简化
+        other_pattern = r'\]\((https?:\/\/[^\s\)]+)\)'
+        other_links = re.findall(other_pattern, text)
+        if other_links:
+            logger.debug(f"[文件处理] 发现其他格式链接: {other_links}")
+            # 不再处理这些链接，因为主要的链接已经在前面处理过了
+
+        # 识别普通文件链接 - 简化处理
         file_pattern = r'https?://[^\s<>"]+?/[^\s<>"]+\.(?:pdf|doc|docx|xls|xlsx|txt|zip|rar|7z|tar|gz)'
         file_links = re.findall(file_pattern, text)
-        for url in file_links:
-            await self.download_and_send_file(bot, message, url)
+        if file_links:
+            logger.debug(f"[文件处理] 发现普通文件链接: {file_links}")
+            # 不再处理这些链接，因为主要的链接已经在前面处理过了
 
         pattern = r'\$\$[^$$]+\]\$\$https?:\/\/[^\s$$]+\)'
         text = re.sub(pattern, '', text)
@@ -1733,7 +1919,16 @@ class Dify(PluginBase):
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
 
-    async def text_to_voice_message(self, bot: WechatAPIClient, message: dict, text: str):
+    async def text_to_voice_message(self, bot: WechatAPIClient, message: dict, text: str = None, message_id: str = None):
+        """
+        将文本转换为语音消息并发送
+
+        Args:
+            bot: WechatAPIClient实例
+            message: 消息字典
+            text: 要转换为语音的文本内容（可选，如果提供message_id则可为None）
+            message_id: Dify生成的消息ID（可选，优先级高于text）
+        """
         try:
             # 使用当前模型的 base-url 构建文本转音频 URL
             model = self.get_user_model(message["SenderWxid"])
@@ -1741,17 +1936,35 @@ class Dify(PluginBase):
             logger.debug(f"使用文本转音频 URL: {text_to_audio_url}")
 
             headers = {"Authorization": f"Bearer {model.api_key}", "Content-Type": "application/json"}
-            data = {"text": text, "user": message["SenderWxid"]}
+
+            # 构建请求数据，支持message_id参数
+            data = {"user": message["SenderWxid"]}
+
+            # 优先使用message_id，如果没有则使用text
+            if message_id:
+                data["message_id"] = message_id
+                logger.debug(f"使用message_id: {message_id}进行文本转语音")
+            elif text:
+                data["text"] = text
+                logger.debug(f"使用text进行文本转语音: {text[:50]}..." if len(text) > 50 else f"使用text进行文本转语音: {text}")
+            else:
+                logger.error("文本转语音失败: 未提供text或message_id参数")
+                await bot.send_text_message(message["FromWxid"], f"{TEXT_TO_VOICE_FAILED}: 未提供文本内容或消息ID")
+                return
+
             async with aiohttp.ClientSession(proxy=self.http_proxy) as session:
                 async with session.post(text_to_audio_url, headers=headers, json=data) as resp:
                     if resp.status == 200:
                         audio = await resp.read()
                         await bot.send_voice_message(message["FromWxid"], voice=audio, format="mp3")
+                        logger.info(f"文本转语音成功，{'使用message_id' if message_id else '使用text'}")
                     else:
-                        logger.error(f"text-to-audio 接口调用失败: {resp.status} - {await resp.text()}")
-                        await bot.send_text_message(message["FromWxid"], TEXT_TO_VOICE_FAILED)
+                        error_text = await resp.text()
+                        logger.error(f"text-to-audio 接口调用失败: {resp.status} - {error_text}")
+                        await bot.send_text_message(message["FromWxid"], f"{TEXT_TO_VOICE_FAILED}: 状态码 {resp.status}")
         except Exception as e:
             logger.error(f"text-to-audio 接口调用异常: {e}")
+            logger.error(traceback.format_exc())
             await bot.send_text_message(message["FromWxid"], f"{TEXT_TO_VOICE_FAILED}: {str(e)}")
 
     @on_image_message(priority=20)
