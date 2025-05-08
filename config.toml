@@ -24,7 +24,7 @@ robot-names = ["毛球", "🥥", "智能助手"]
 [Dify.models]
 # 学姐模型配置
 [Dify.models."学姐"]
-api-key = "app-9hiqqQIi8bZfvmaFc56WPyYH"
+api-key = "app-zPoThZ1qVxei3DRVS7k4ZLqN"
 base-url = "http://192.168.6.19:8080/v1"
 trigger-words = ["@学姐"]
 wakeup-words = ["学姐"]

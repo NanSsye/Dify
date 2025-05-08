@@ -13,6 +13,7 @@ from enum import Enum
 import urllib.parse
 import mimetypes
 import base64
+import uuid
 
 import aiohttp
 import filetype
@@ -62,7 +63,7 @@ class ModelConfig:
 class Dify(PluginBase):
     description = "Dify插件"
     author = "老夏的金库"
-    version = "1.4.1"  # 更新版本号 - 移除聊天室功能
+    version = "1.4.2"  # 更新版本号 - 移除聊天室功能
     is_ai_platform = True  # 标记为 AI 平台插件
 
     def __init__(self):
@@ -962,15 +963,27 @@ class Dify(PluginBase):
             logger.debug(f"开始调用 Dify API - 用户消息: {processed_query}")
             logger.debug(f"文件列表: {formatted_files}")
 
-            # 使用发送者的wxid而不是群聊id来获取和存储会话ID
+            # 获取会话ID
             user_wxid = message["SenderWxid"]
-            # 对于群聊消息，使用发送者的wxid作为会话ID的key
+            from_wxid = message["FromWxid"]
+
+            # 对于群聊消息，可以选择使用群聊ID或发送者ID作为会话ID的键
             if message["IsGroup"]:
-                logger.debug(f"群聊消息，使用发送者wxid '{user_wxid}' 获取会话ID")
-                conversation_id = self.db.get_llm_thread_id(user_wxid, namespace="dify")
+                # 检查配置，决定使用群聊ID还是发送者ID
+                # 默认使用群聊ID作为会话ID的键，这与原始行为一致
+                use_group_id = True
+
+                if use_group_id:
+                    # 使用群聊ID作为会话ID的键
+                    logger.debug(f"群聊消息，使用群聊ID '{from_wxid}' 获取会话ID")
+                    conversation_id = self.db.get_llm_thread_id(from_wxid, namespace="dify")
+                else:
+                    # 使用发送者的wxid作为会话ID的键
+                    logger.debug(f"群聊消息，使用发送者wxid '{user_wxid}' 获取会话ID")
+                    conversation_id = self.db.get_llm_thread_id(user_wxid, namespace="dify")
             else:
                 # 私聊消息，使用原来的FromWxid
-                conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
+                conversation_id = self.db.get_llm_thread_id(from_wxid, namespace="dify")
 
             try:
                 user_username = await bot.get_nickname(user_wxid) or "未知用户"
@@ -983,12 +996,15 @@ class Dify(PluginBase):
             }
 
             # 根据是否支持Agent模式，设置不同的请求参数
+            # 对于群聊消息，使用群聊ID作为user参数，这样对话会与群聊关联，而不是与个人关联
+            user_id = from_wxid if message["IsGroup"] else user_wxid
+
             payload = {
                 "inputs": inputs,
                 "query": processed_query,
                 "response_mode": "streaming",  # 始终使用流式响应
                 "conversation_id": conversation_id,
-                "user": user_wxid,  # 使用发送者的wxid而不是群聊id
+                "user": user_id,  # 对于群聊使用群聊ID，对于私聊使用发送者的wxid
                 "files": formatted_files,
                 "auto_generate_name": False,
             }
@@ -1026,9 +1042,9 @@ class Dify(PluginBase):
                         if new_con_id and new_con_id != conversation_id:
                             # 根据消息类型选择正确的ID来保存会话ID
                             if message["IsGroup"]:
-                                # 群聊消息，使用发送者的wxid
-                                self.db.save_llm_thread_id(message["SenderWxid"], new_con_id, "dify")
-                                logger.debug(f"群聊消息，保存会话ID到发送者wxid: {message['SenderWxid']}")
+                                # 群聊消息，使用群聊ID
+                                self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
+                                logger.debug(f"群聊消息，保存会话ID到群聊ID: {message['FromWxid']}")
                             else:
                                 # 私聊消息，使用原来的FromWxid
                                 self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
@@ -1154,9 +1170,9 @@ class Dify(PluginBase):
                             if new_con_id and new_con_id != conversation_id:
                                 # 根据消息类型选择正确的ID来保存会话ID
                                 if message["IsGroup"]:
-                                    # 群聊消息，使用发送者的wxid
-                                    self.db.save_llm_thread_id(message["SenderWxid"], new_con_id, "dify")
-                                    logger.debug(f"群聊消息，保存会话ID到发送者wxid: {message['SenderWxid']}")
+                                    # 群聊消息，使用群聊ID
+                                    self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
+                                    logger.debug(f"群聊消息，保存会话ID到群聊ID: {message['FromWxid']}")
                                 else:
                                     # 私聊消息，使用原来的FromWxid
                                     self.db.save_llm_thread_id(message["FromWxid"], new_con_id, "dify")
@@ -1170,16 +1186,119 @@ class Dify(PluginBase):
                             logger.warning("会话ID不存在，重置会话ID并重试")
                             # 根据消息类型选择正确的ID来重置会话ID
                             if message["IsGroup"]:
-                                # 群聊消息，使用发送者的wxid
-                                self.db.save_llm_thread_id(message["SenderWxid"], "", "dify")
-                                logger.debug(f"群聊消息，重置会话ID，发送者wxid: {message['SenderWxid']}")
+                                # 群聊消息，使用群聊ID
+                                self.db.save_llm_thread_id(message["FromWxid"], "", "dify")
+                                logger.debug(f"群聊消息，重置会话ID，群聊ID: {message['FromWxid']}")
                             else:
                                 # 私聊消息，使用原来的FromWxid
                                 self.db.save_llm_thread_id(message["FromWxid"], "", "dify")
                             # 重要：在递归调用时必须传递原始模型，不要重新选择
                             return await self.dify(bot, message, processed_query, files=files, specific_model=model)
                         elif resp.status == 400:
-                            return await self.handle_400(bot, message, resp)
+                            # 先获取错误内容
+                            error_text = await resp.content.read()
+                            error_text_str = error_text.decode('utf-8')
+
+                            logger.debug(f"收到400错误，完整错误信息: {error_text_str}")
+
+                            # 强制重置会话ID，无论错误类型如何
+                            # 这是一个更激进的解决方案，但可以确保会话ID被重置
+                            logger.warning("收到400错误，强制重置会话ID")
+
+                            # 重置会话ID
+                            # 根据消息类型选择正确的ID来重置会话ID
+                            if message.get("IsGroup", False):
+                                # 群聊消息，使用群聊ID
+                                from_wxid = message.get("FromWxid", "")
+                                if from_wxid:
+                                    # 确保完全清除会话ID
+                                    self.db.save_llm_thread_id(from_wxid, "", "dify")
+                                    logger.info(f"已重置群聊 {from_wxid} 的会话ID")
+                            else:
+                                # 私聊消息，使用原来的FromWxid
+                                from_wxid = message.get("FromWxid", "")
+                                if from_wxid:
+                                    # 确保完全清除会话ID
+                                    self.db.save_llm_thread_id(from_wxid, "", "dify")
+                                    logger.info(f"已重置私聊用户 {from_wxid} 的会话ID")
+
+                            # 通知用户
+                            await bot.send_text_message(
+                                message["FromWxid"],
+                                f"{XYBOT_PREFIX}检测到对话异常，已重置对话。正在重新处理您的问题..."
+                            )
+
+                            # 等待一小段时间，确保数据库操作完成
+                            await asyncio.sleep(1)
+
+                            # 创建一个新的会话ID
+                            new_conversation_id = str(uuid.uuid4())
+                            logger.info(f"生成新的会话ID: {new_conversation_id}")
+
+                            # 保存新的会话ID
+                            if message.get("IsGroup", False):
+                                # 群聊消息，使用群聊ID
+                                self.db.save_llm_thread_id(message.get("FromWxid", ""), new_conversation_id, "dify")
+                            else:
+                                # 私聊消息，使用原来的FromWxid
+                                self.db.save_llm_thread_id(message.get("FromWxid", ""), new_conversation_id, "dify")
+
+                            # 修改payload，使用新的会话ID
+                            payload["conversation_id"] = new_conversation_id
+                            logger.info(f"更新payload中的会话ID为: {new_conversation_id}")
+
+                            # 重新发送请求，使用新的会话ID
+                            logger.info("使用新会话ID重新发送请求")
+
+                            # 重新构建请求
+                            headers = {"Authorization": f"Bearer {model.api_key}", "Content-Type": "application/json"}
+                            ai_resp = ""
+
+                            # 重新发送请求
+                            logger.debug(f"重新发送请求到 Dify - URL: {model.base_url}/chat-messages, 新会话ID: {new_conversation_id}")
+                            async with aiohttp.ClientSession(proxy=self.http_proxy) as new_session:
+                                async with new_session.post(url=f"{model.base_url}/chat-messages", headers=headers, data=json.dumps(payload)) as new_resp:
+                                    if new_resp.status in (200, 201):
+                                        # 处理成功响应
+                                        logger.info("使用新会话ID的请求成功")
+                                        # 读取响应内容
+                                        async for line in new_resp.content:
+                                            line = line.decode("utf-8").strip()
+                                            if not line or line == "event: ping":
+                                                continue
+                                            elif line.startswith("data: "):
+                                                line = line[6:]
+                                            try:
+                                                resp_json = json.loads(line)
+                                                event = resp_json.get("event", "")
+                                                if event == "message":
+                                                    ai_resp += resp_json.get("answer", "")
+                                                elif event == "message_end":
+                                                    # 处理消息结束事件
+                                                    think_pattern = r'<think>.*?</think>'
+                                                    ai_resp = re.sub(think_pattern, '', ai_resp, flags=re.DOTALL)
+                                            except json.JSONDecodeError:
+                                                logger.error(f"重试请求返回的JSON解析错误: {line}")
+                                                continue
+
+                                        # 处理响应
+                                        if ai_resp:
+                                            await self.dify_handle_text(bot, message, ai_resp, model)
+                                            return
+                                        else:
+                                            logger.warning("重试请求未返回有效响应")
+                                    else:
+                                        # 如果重试仍然失败，放弃并通知用户
+                                        error_msg = await new_resp.text()
+                                        logger.error(f"重试请求失败: HTTP {new_resp.status} - {error_msg}")
+                                        await bot.send_text_message(
+                                            message["FromWxid"],
+                                            f"{XYBOT_PREFIX}重试请求失败，请稍后再试。"
+                                        )
+                                        return
+
+                            # 如果执行到这里，说明重试失败，回退到原始方法
+                            return await self.dify(bot, message, processed_query, files=files, specific_model=model)
                         elif resp.status == 500:
                             return await self.handle_500(bot, message)
                         else:
@@ -1197,7 +1316,7 @@ class Dify(PluginBase):
                     logger.warning("Dify未返回有效响应")
         except Exception as e:
             logger.error(f"Dify API 调用失败: {e}")
-            await self.hendle_exceptions(bot, message, model_config=model)
+            await self.handle_exceptions(bot, message, model_config=model)
 
     async def download_file(self, url: str) -> bytes:
         """
@@ -1393,6 +1512,9 @@ class Dify(PluginBase):
             formdata.add_field("file", file_content,
                             filename=processed_file_name,
                             content_type=mime_type)
+            # 确保使用正确的用户ID
+            # 如果user是群聊ID（包含@chatroom），则使用它
+            # 否则，使用发送者的wxid
             formdata.add_field("user", user)
 
             url = f"{model.base_url}/files/upload"
@@ -1457,9 +1579,9 @@ class Dify(PluginBase):
         # 获取会话ID，用于查找Agent思考过程
         # 根据消息类型选择正确的ID来获取会话ID
         if message["IsGroup"]:
-            # 群聊消息，使用发送者的wxid
-            conversation_id = self.db.get_llm_thread_id(message["SenderWxid"], namespace="dify")
-            logger.debug(f"群聊消息，从发送者wxid获取会话ID: {message['SenderWxid']}")
+            # 群聊消息，使用群聊ID
+            conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
+            logger.debug(f"群聊消息，从群聊ID获取会话ID: {message['FromWxid']}")
         else:
             # 私聊消息，使用原来的FromWxid
             conversation_id = self.db.get_llm_thread_id(message["FromWxid"], namespace="dify")
@@ -1709,12 +1831,15 @@ class Dify(PluginBase):
                                 image_content = await resp.read()
                                 logger.info(f"成功从URL下载图片，大小: {len(image_content)} 字节")
 
+                                # 对于群聊消息，使用群聊ID作为user参数，这样对话会与群聊关联，而不是与个人关联
+                                user_id = message["FromWxid"] if message.get("IsGroup", False) else message["SenderWxid"]
+
                                 # 上传到 Dify
                                 file_info = await self.upload_file_to_dify(
                                     image_content,
                                     f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
                                     "image/jpeg",  # 根据实际图片类型调整
-                                    message["FromWxid"],
+                                    user_id,  # 使用正确的用户ID
                                     model_config=model_config  # 传递模型配置
                                 )
                                 if file_info:
@@ -1732,12 +1857,15 @@ class Dify(PluginBase):
                 logger.info(f"处理二进制图片数据，大小: {len(image)} 字节")
                 image_content = image
 
+                # 对于群聊消息，使用群聊ID作为user参数，这样对话会与群聊关联，而不是与个人关联
+                user_id = message["FromWxid"] if message.get("IsGroup", False) else message["SenderWxid"]
+
                 # 上传到 Dify
                 file_info = await self.upload_file_to_dify(
                     image_content,
                     f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
                     "image/jpeg",  # 根据实际图片类型调整
-                    message["FromWxid"],
+                    user_id,  # 使用正确的用户ID
                     model_config=model_config  # 传递模型配置
                 )
                 if file_info:
@@ -1814,12 +1942,7 @@ class Dify(PluginBase):
                   f"错误信息：{err_message}")
         await bot.send_text_message(message["FromWxid"], output)
 
-    @staticmethod
-    async def handle_400(bot: WechatAPIClient, message: dict, resp: aiohttp.ClientResponse):
-        output = (XYBOT_PREFIX +
-                  "🙅对不起，出现错误！\n"
-                  f"错误信息：{(await resp.content.read()).decode('utf-8')}")
-        await bot.send_text_message(message["FromWxid"], output)
+
 
     @staticmethod
     async def handle_500(bot: WechatAPIClient, message: dict):
@@ -1835,7 +1958,7 @@ class Dify(PluginBase):
         await bot.send_text_message(message["FromWxid"], ai_resp)
 
     @staticmethod
-    async def hendle_exceptions(bot: WechatAPIClient, message: dict, model_config=None):
+    async def handle_exceptions(bot: WechatAPIClient, message: dict, model_config=None):
         output = (XYBOT_PREFIX +
                   "🙅对不起，出现错误！\n"
                   f"错误信息：\n"
@@ -1885,7 +2008,9 @@ class Dify(PluginBase):
             with open(mp3_file, "rb") as f:
                 mp3_data = f.read()
             formdata.add_field("file", mp3_data, filename="audio.mp3", content_type="audio/mp3")
-            formdata.add_field("user", message["SenderWxid"])
+            # 对于群聊消息，使用群聊ID作为user参数，这样对话会与群聊关联，而不是与个人关联
+            user_id = message["FromWxid"] if message.get("IsGroup", False) else message["SenderWxid"]
+            formdata.add_field("user", user_id)
             async with aiohttp.ClientSession(proxy=self.http_proxy) as session:
                 async with session.post(audio_to_text_url, headers=headers, data=formdata) as resp:
                     if resp.status == 200:
@@ -2058,8 +2183,9 @@ class Dify(PluginBase):
                             md5 = img_element.get('md5')
                             aeskey = img_element.get('aeskey')
                             length = img_element.get('length')
-                            cdnmidimgurl = img_element.get('cdnmidimgurl')
-                            cdnthumburl = img_element.get('cdnthumburl')
+                            # 获取图片URL，但不使用这些变量，避免IDE警告
+                            # cdnmidimgurl = img_element.get('cdnmidimgurl')
+                            # cdnthumburl = img_element.get('cdnthumburl')
 
                             logger.info(f"从XML解析到图片信息: md5={md5}, aeskey={aeskey}, length={length}")
 
