@@ -63,7 +63,7 @@ class ModelConfig:
 class Dify(PluginBase):
     description = "Dify插件"
     author = "老夏的金库"
-    version = "1.4.2"  # 更新版本号 - 移除聊天室功能
+    version = "1.4.3"  # 更新版本号 - 移除聊天室功能
     is_ai_platform = True  # 标记为 AI 平台插件
 
     def __init__(self):
