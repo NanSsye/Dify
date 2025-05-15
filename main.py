@@ -63,12 +63,14 @@ class ModelConfig:
 class Dify(PluginBase):
     description = "Dify插件"
     author = "老夏的金库"
-    version = "1.4.3"  # 更新版本号 - 移除聊天室功能
+    version = "1.5.0"  # 更新版本号 - 增加图片引用功能
     is_ai_platform = True  # 标记为 AI 平台插件
 
     def __init__(self):
         super().__init__()
         self.user_models = {}  # 存储用户当前使用的模型
+        self.processed_messages = {}  # 存储已处理的消息ID，避免重复处理
+        self.message_expiry = 60  # 消息处理记录的过期时间（秒）
         try:
             with open("main_config.toml", "rb") as f:
                 config = tomllib.load(f)
@@ -177,6 +179,33 @@ class Dify(PluginBase):
         """设置用户当前使用的模型"""
         if self.remember_user_model:
             self.user_models[user_id] = model
+
+    def is_message_processed(self, message: dict) -> bool:
+        """检查消息是否已经处理过"""
+        # 清理过期的消息记录
+        current_time = time.time()
+        expired_keys = []
+        for msg_id, timestamp in self.processed_messages.items():
+            if current_time - timestamp > self.message_expiry:
+                expired_keys.append(msg_id)
+
+        for key in expired_keys:
+            del self.processed_messages[key]
+
+        # 获取消息ID
+        msg_id = message.get("MsgId") or message.get("NewMsgId")
+        if not msg_id:
+            return False  # 如果没有消息ID，视为未处理过
+
+        # 检查消息是否已处理
+        return msg_id in self.processed_messages
+
+    def mark_message_processed(self, message: dict):
+        """标记消息为已处理"""
+        msg_id = message.get("MsgId") or message.get("NewMsgId")
+        if msg_id:
+            self.processed_messages[msg_id] = time.time()
+            logger.debug(f"标记消息 {msg_id} 为已处理")
 
     def get_model_from_message(self, content: str, user_id: str) -> tuple[ModelConfig, str, bool]:
         """根据消息内容判断使用哪个模型，并返回是否是切换模型的命令"""
@@ -590,13 +619,42 @@ class Dify(PluginBase):
     async def handle_quote(self, bot: WechatAPIClient, message: dict):
         """处理引用消息"""
         if not self.enable:
-            return
+            return True  # 如果插件未启用，允许其他插件处理
+
+        # 检查消息是否已经处理过
+        if self.is_message_processed(message):
+            logger.info(f"消息 {message.get('MsgId') or message.get('NewMsgId')} 已经处理过，跳过")
+            return False  # 消息已处理，阻止后续插件处理
+
+        # 标记消息为已处理
+        self.mark_message_processed(message)
 
         # 提取引用消息的内容
         content = message["Content"].strip()
         quote_info = message.get("Quote", {})
         quoted_content = quote_info.get("Content", "")
         quoted_sender = quote_info.get("Nickname", "")
+
+        logger.info(f"处理引用消息: 内容={content}, 引用内容={quoted_content}, 引用发送者={quoted_sender}")
+
+        # 检查引用的消息是否包含图片
+        image_md5 = message.get("ImageMD5")  # 首先检查消息中是否已经有MD5（从XML处理中传递过来的）
+
+        # 如果没有，尝试从引用消息中提取
+        if not image_md5 and quote_info.get("MsgType") == 3:  # 图片消息
+            try:
+                # 尝试从引用的图片消息中提取MD5
+                if "<?xml" in quoted_content and "<img" in quoted_content:
+                    root = ET.fromstring(quoted_content)
+                    img_element = root.find('img')
+                    if img_element is not None:
+                        image_md5 = img_element.get('md5')
+                        logger.info(f"从引用的图片消息中提取到MD5: {image_md5}")
+            except Exception as e:
+                logger.error(f"解析引用图片消息XML失败: {e}")
+
+        if image_md5:
+            logger.info(f"引用消息处理: 找到图片MD5: {image_md5}")
 
         # 处理群聊和私聊的情况
         if message["IsGroup"]:
@@ -686,26 +744,53 @@ class Dify(PluginBase):
                     await bot.send_at_message(message["FromWxid"], f"\n此模型API密钥未配置，请联系管理员", [user_wxid])
                     return False
 
-                # 检查是否有最近的图片
+                # 检查是否有图片
                 files = []
-                image_content = await self.get_cached_image(group_id)
-                if image_content:
+
+                # 优先检查引用消息中的图片MD5
+                if image_md5:
                     try:
-                        logger.debug("引用消息中发现最近的图片，准备上传到 Dify")
-                        file_id = await self.upload_file_to_dify(
-                            image_content,
-                            f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
-                            "image/jpeg",
-                            group_id,
-                            model_config=model
-                        )
-                        if file_id:
-                            logger.debug(f"图片上传成功，文件ID: {file_id}")
-                            files = [file_id]
+                        logger.info(f"尝试根据MD5查找图片: {image_md5}")
+                        image_content = await self.find_image_by_md5(image_md5)
+                        if image_content:
+                            logger.info(f"根据MD5找到图片，大小: {len(image_content)} 字节")
+                            file_id = await self.upload_file_to_dify(
+                                image_content,
+                                f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
+                                "image/jpeg",
+                                group_id,
+                                model_config=model
+                            )
+                            if file_id:
+                                logger.info(f"引用图片上传成功，文件ID: {file_id}")
+                                files = [file_id]
+                            else:
+                                logger.error("引用图片上传失败")
                         else:
-                            logger.error("图片上传失败")
+                            logger.warning(f"未找到MD5为 {image_md5} 的图片")
                     except Exception as e:
-                        logger.error(f"处理图片失败: {e}")
+                        logger.error(f"处理引用图片失败: {e}")
+
+                # 如果没有找到引用的图片，检查最近的缓存图片
+                if not files:
+                    image_content = await self.get_cached_image(group_id)
+                    if image_content:
+                        try:
+                            logger.debug("引用消息中发现最近的图片，准备上传到 Dify")
+                            file_id = await self.upload_file_to_dify(
+                                image_content,
+                                f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
+                                "image/jpeg",
+                                group_id,
+                                model_config=model
+                            )
+                            if file_id:
+                                logger.debug(f"图片上传成功，文件ID: {file_id}")
+                                files = [file_id]
+                            else:
+                                logger.error("图片上传失败")
+                        except Exception as e:
+                            logger.error(f"处理图片失败: {e}")
 
                 if await self._check_point(bot, message, model):
                     logger.info(f"引用消息使用模型 '{next((name for name, config in self.models.items() if config == model), '未知')}' 处理请求")
@@ -740,26 +825,53 @@ class Dify(PluginBase):
                 await bot.send_text_message(message["FromWxid"], "此模型API密钥未配置，请联系管理员")
                 return False
 
-            # 检查是否有最近的图片
+            # 检查是否有图片
             files = []
-            image_content = await self.get_cached_image(message["FromWxid"])
-            if image_content:
+
+            # 优先检查引用消息中的图片MD5
+            if image_md5:
                 try:
-                    logger.debug("引用消息中发现最近的图片，准备上传到 Dify")
-                    file_id = await self.upload_file_to_dify(
-                        image_content,
-                        f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
-                        "image/jpeg",
-                        message["FromWxid"],
-                        model_config=model
-                    )
-                    if file_id:
-                        logger.debug(f"图片上传成功，文件ID: {file_id}")
-                        files = [file_id]
+                    logger.info(f"尝试根据MD5查找图片: {image_md5}")
+                    image_content = await self.find_image_by_md5(image_md5)
+                    if image_content:
+                        logger.info(f"根据MD5找到图片，大小: {len(image_content)} 字节")
+                        file_id = await self.upload_file_to_dify(
+                            image_content,
+                            f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
+                            "image/jpeg",
+                            message["FromWxid"],
+                            model_config=model
+                        )
+                        if file_id:
+                            logger.info(f"引用图片上传成功，文件ID: {file_id}")
+                            files = [file_id]
+                        else:
+                            logger.error("引用图片上传失败")
                     else:
-                        logger.error("图片上传失败")
+                        logger.warning(f"未找到MD5为 {image_md5} 的图片")
                 except Exception as e:
-                    logger.error(f"处理图片失败: {e}")
+                    logger.error(f"处理引用图片失败: {e}")
+
+            # 如果没有找到引用的图片，检查最近的缓存图片
+            if not files:
+                image_content = await self.get_cached_image(message["FromWxid"])
+                if image_content:
+                    try:
+                        logger.debug("引用消息中发现最近的图片，准备上传到 Dify")
+                        file_id = await self.upload_file_to_dify(
+                            image_content,
+                            f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
+                            "image/jpeg",
+                            message["FromWxid"],
+                            model_config=model
+                        )
+                        if file_id:
+                            logger.debug(f"图片上传成功，文件ID: {file_id}")
+                            files = [file_id]
+                        else:
+                            logger.error("图片上传失败")
+                    except Exception as e:
+                        logger.error(f"处理图片失败: {e}")
 
             if await self._check_point(bot, message, model):
                 logger.info(f"私聊引用消息使用模型 '{next((name for name, config in self.models.items() if config == model), '未知')}' 处理请求")
@@ -830,6 +942,52 @@ class Dify(PluginBase):
         # 检查消息类型
         msg_type = message.get("MsgType")
         logger.debug(f"消息类型: {msg_type}, 是否有Quote字段: {'Quote' in message}")
+
+        # 增强对XML引用消息的处理
+        if "Quote" in message:
+            logger.info(f"详细检查引用消息是否@机器人: {content[:50]}...")
+
+            # 直接检查消息内容中是否包含@机器人
+            for robot_name in self.robot_names:
+                # 检查格式: "@小球子 xxx"
+                if f"@{robot_name}" in content:
+                    logger.info(f"在引用消息内容中发现@{robot_name}")
+                    return True
+
+                # 检查格式: "@小球子"（消息开头）
+                if content.startswith(f'@{robot_name}'):
+                    logger.info(f"引用消息内容以@{robot_name}开头")
+                    return True
+
+                # 特殊处理：检查是否是@小球子这样的格式（忽略大小写）
+                if content.lower().startswith(f'@{robot_name.lower()}'):
+                    logger.info(f"引用消息内容以@{robot_name}开头（忽略大小写）")
+                    return True
+
+                # 检查格式: "@小球子"（消息中间）
+                at_pattern = re.compile(f'@{robot_name}\\b')
+                if at_pattern.search(content):
+                    logger.info(f"在引用消息内容中发现@{robot_name}（正则匹配）")
+                    return True
+
+            # 检查消息内容是否以@开头，后面跟着空格和其他内容
+            if content.startswith('@'):
+                # 提取@后面的名称部分
+                space_index = content.find(' ')
+                if space_index > 0:
+                    at_name = content[1:space_index].strip()
+                    logger.info(f"提取到@名称: {at_name}")
+
+                    # 检查提取的名称是否是机器人名称
+                    for robot_name in self.robot_names:
+                        if at_name == robot_name or at_name.lower() == robot_name.lower():
+                            logger.info(f"@名称匹配机器人名称: {robot_name}")
+                            return True
+
+                        # 检查名称是否部分匹配（例如@小球 可能是@小球子的简写）
+                        if robot_name.startswith(at_name) or robot_name.lower().startswith(at_name.lower()):
+                            logger.info(f"@名称部分匹配机器人名称: {at_name} -> {robot_name}")
+                            return True
 
         # 如果消息内容以@开头，这是一个强烈的信号，表明用户@了某人
         if content.startswith('@'):
@@ -1583,7 +1741,7 @@ class Dify(PluginBase):
 
     async def dify_handle_text(self, bot: WechatAPIClient, message: dict, text: str, model_config=None, message_id=None):
         """
-        处理Dify返回的文本消息
+        处理Dify返回的文本消息，支持引用回复
 
         Args:
             bot: WechatAPIClient实例
@@ -1643,26 +1801,82 @@ class Dify(PluginBase):
 
         # 先发送文字内容
         if text:
+            # 检查是否需要发送语音消息
             if message["MsgType"] == 34 or self.voice_reply_all:
                 # 获取消息ID，如果有的话
-                message_id = None
+                agent_message_id = None
                 if self.support_agent_mode and conversation_id in self.current_agent_thoughts:
                     thoughts = self.current_agent_thoughts[conversation_id]
                     if thoughts and thoughts[-1].get("message_id"):
-                        message_id = thoughts[-1].get("message_id")
-                        logger.debug(f"找到Agent消息ID: {message_id}，将用于文本转语音")
+                        agent_message_id = thoughts[-1].get("message_id")
+                        logger.debug(f"找到Agent消息ID: {agent_message_id}，将用于文本转语音")
 
                 # 使用message_id或text调用文本转语音
-                await self.text_to_voice_message(bot, message, text=text, message_id=message_id)
+                await self.text_to_voice_message(bot, message, text=text, message_id=agent_message_id)
             else:
                 # 使用 //n 作为分隔符进行分段发送
                 paragraphs = text.split("//n")
                 logger.info(f"检测到 //n 分隔符，将消息分为 {len(paragraphs)} 段发送")
 
+                # 检查是否是引用消息
+                should_quote = False
+
+                # 首先检查是否有Quote字段（XML引用消息）
+                if message.get("Quote"):
+                    quote_info = message.get("Quote", {})
+                    quoted_msg_id = quote_info.get("MsgId", "") or quote_info.get("NewMsgId", "")
+                    quoted_wxid = quote_info.get("FromWxid", "")
+                    quoted_content = quote_info.get("Content", "")
+                    quoted_nickname = quote_info.get("Nickname", "")
+
+                    # 如果没有昵称，尝试获取
+                    if not quoted_nickname:
+                        try:
+                            quoted_nickname = await bot.get_nickname(quoted_wxid) or "未知用户"
+                        except:
+                            quoted_nickname = "未知用户"
+
+                    logger.info(f"检测到XML引用消息，引用MsgId={quoted_msg_id}, 引用人={quoted_nickname}")
+
+                    # 如果有消息ID且内容不是太长，使用引用回复
+                    if quoted_msg_id and quoted_wxid and quoted_content and len(quoted_content) <= 100:
+                        should_quote = True
+                        logger.info(f"将使用引用消息回复，引用MsgId={quoted_msg_id}")
+                else:
+                    # 使用普通消息信息
+                    quoted_msg_id = message.get("MsgId", "")
+                    quoted_wxid = message.get("SenderWxid", "")
+                    quoted_content = message.get("Content", "")
+
+                    # 尝试获取引用消息的发送者昵称
+                    try:
+                        quoted_nickname = await bot.get_nickname(quoted_wxid) or "未知用户"
+                    except:
+                        quoted_nickname = "未知用户"
+
+                    # 如果有消息ID且内容不是太长，使用引用回复
+                    if quoted_msg_id and quoted_wxid and quoted_content and len(quoted_content) <= 100:
+                        should_quote = True
+                        logger.info(f"将使用普通消息引用回复，引用MsgId={quoted_msg_id}")
+
                 for i, paragraph in enumerate(paragraphs):
                     if paragraph.strip():
                         logger.debug(f"发送第 {i+1}/{len(paragraphs)} 段消息，长度: {len(paragraph.strip())} 字符")
-                        await bot.send_text_message(message["FromWxid"], paragraph.strip())
+
+                        # 只对第一段使用引用回复
+                        if should_quote and i == 0:
+                            await self.send_quote_message(
+                                bot,
+                                message["FromWxid"],
+                                paragraph.strip(),
+                                quoted_msg_id,
+                                quoted_wxid,
+                                quoted_nickname,
+                                quoted_content[:100]  # 截断过长的引用内容
+                            )
+                        else:
+                            await bot.send_text_message(message["FromWxid"], paragraph.strip())
+
                         # 添加短暂延迟，避免消息发送过快
                         if i < len(paragraphs) - 1:  # 如果不是最后一段
                             await asyncio.sleep(0.5)  # 添加0.5秒延迟
@@ -2341,6 +2555,34 @@ class Dify(PluginBase):
             logger.debug(f"未找到用户 {user_wxid} 的缓存图片")
         return None
 
+    async def find_image_by_md5(self, md5: str) -> Optional[bytes]:
+        """根据MD5查找图片文件"""
+        if not md5:
+            logger.warning("MD5为空，无法查找图片")
+            return None
+
+        # 检查files目录是否存在
+        files_dir = os.path.join(os.getcwd(), "files")
+        if not os.path.exists(files_dir):
+            logger.warning(f"files目录不存在: {files_dir}")
+            return None
+
+        # 尝试查找不同扩展名的图片文件
+        for ext in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+            file_path = os.path.join(files_dir, f"{md5}.{ext}")
+            if os.path.exists(file_path):
+                try:
+                    # 读取图片文件
+                    with open(file_path, "rb") as f:
+                        image_data = f.read()
+                    logger.info(f"根据MD5找到图片文件: {file_path}, 大小: {len(image_data)} 字节")
+                    return image_data
+                except Exception as e:
+                    logger.error(f"读取图片文件失败: {e}")
+
+        logger.warning(f"未找到MD5为 {md5} 的图片文件")
+        return None
+
     async def get_cached_file(self, user_wxid: str) -> Optional[tuple[bytes, str, str]]:
         """获取用户最近的文件，返回 (文件内容, 文件名, MIME类型)"""
         logger.debug(f"尝试获取用户 {user_wxid} 的缓存文件")
@@ -2475,11 +2717,149 @@ class Dify(PluginBase):
         if not self.enable:
             return True
 
+        # 检查消息是否已经处理过
+        if self.is_message_processed(message):
+            logger.info(f"XML消息 {message.get('MsgId') or message.get('NewMsgId')} 已经处理过，跳过")
+            return True  # 消息已处理，允许其他插件处理
+
         # 检查是否是引用消息
         if message.get("Quote"):
             logger.info("Dify: 检测到XML引用消息，直接处理")
-            # 直接调用引用消息处理方法
-            return await self.handle_quote(bot, message)
+
+            # 提取引用消息的详细信息
+            quote_info = message.get("Quote", {})
+            quoted_msg_id = quote_info.get("MsgId", "") or quote_info.get("NewMsgId", "")
+            quoted_wxid = quote_info.get("FromWxid", "")
+            quoted_content = quote_info.get("Content", "")
+            quoted_nickname = quote_info.get("Nickname", "")
+            quoted_msg_type = quote_info.get("MsgType")
+
+            logger.info(f"引用消息详情: MsgId={quoted_msg_id}, 发送者={quoted_nickname}, 类型={quoted_msg_type}, 内容={quoted_content[:30]}...")
+
+            # 检查引用的消息是否包含图片
+            image_md5 = None
+            if quoted_msg_type == 3:  # 图片消息
+                try:
+                    # 尝试从引用的图片消息中提取MD5
+                    if "<?xml" in quoted_content and "<img" in quoted_content:
+                        root = ET.fromstring(quoted_content)
+                        img_element = root.find('img')
+                        if img_element is not None:
+                            image_md5 = img_element.get('md5')
+                            logger.info(f"从XML引用的图片消息中提取到MD5: {image_md5}")
+                except Exception as e:
+                    logger.error(f"解析XML引用图片消息XML失败: {e}")
+
+            # 获取消息内容
+            content = message.get("Content", "")
+            logger.info(f"XML引用消息内容: {content[:50]}...")
+
+            # 直接检查消息内容中是否包含@机器人
+            is_at_bot = False
+            for robot_name in self.robot_names:
+                if f"@{robot_name}" in content:
+                    logger.info(f"XML引用消息内容中直接发现@{robot_name}")
+                    is_at_bot = True
+                    break
+
+                # 检查格式: "@小球子"（消息开头）
+                if content.startswith(f'@{robot_name}'):
+                    logger.info(f"XML引用消息内容以@{robot_name}开头")
+                    is_at_bot = True
+                    break
+
+            # 如果直接检查没有发现@，使用增强的is_at_message方法
+            if not is_at_bot:
+                is_at_bot = self.is_at_message(message)
+
+            if is_at_bot:
+                logger.info("Dify: XML引用消息中@了机器人，处理该消息")
+
+                # 如果有图片MD5，添加到消息中
+                if image_md5:
+                    message["ImageMD5"] = image_md5
+                    logger.info(f"将图片MD5 {image_md5} 添加到消息中")
+
+                # 标记消息为已处理
+                self.mark_message_processed(message)
+
+                # 直接调用引用消息处理方法，但不使用handle_quote方法
+                # 因为handle_quote方法会再次标记消息为已处理
+                # 而是直接处理消息
+
+                # 检查是否有唤醒词或触发词
+                content = message.get("Content", "").strip()
+                user_wxid = message.get("SenderWxid")
+                model, processed_query, is_switch = self.get_model_from_message(content, user_wxid)
+
+                if is_switch:
+                    model_name = next(name for name, config in self.models.items() if config == model)
+                    if message.get("IsGroup"):
+                        await bot.send_at_message(
+                            message["FromWxid"],
+                            f"已切换到{model_name.upper()}模型，将一直使用该模型直到下次切换。",
+                            [user_wxid]
+                        )
+                    else:
+                        await bot.send_text_message(
+                            message["FromWxid"],
+                            f"已切换到{model_name.upper()}模型，将一直使用该模型直到下次切换。"
+                        )
+                    return False
+
+                # 检查模型API密钥是否可用
+                if not model.api_key:
+                    model_name = next((name for name, config in self.models.items() if config == model), '未知')
+                    logger.error(f"所选模型 '{model_name}' 的API密钥未配置")
+                    if message.get("IsGroup"):
+                        await bot.send_at_message(message["FromWxid"], "此模型API密钥未配置，请联系管理员", [user_wxid])
+                    else:
+                        await bot.send_text_message(message["FromWxid"], "此模型API密钥未配置，请联系管理员")
+                    return False
+
+                # 检查是否有图片
+                files = []
+                if image_md5:
+                    try:
+                        logger.info(f"尝试根据MD5查找图片: {image_md5}")
+                        image_content = await self.find_image_by_md5(image_md5)
+                        if image_content:
+                            logger.info(f"根据MD5找到图片，大小: {len(image_content)} 字节")
+                            file_id = await self.upload_file_to_dify(
+                                image_content,
+                                f"image_{int(time.time())}.jpg",  # 生成一个有效的文件名
+                                "image/jpeg",
+                                message["FromWxid"],
+                                model_config=model
+                            )
+                            if file_id:
+                                logger.info(f"引用图片上传成功，文件ID: {file_id}")
+                                files = [file_id]
+                            else:
+                                logger.error("引用图片上传失败")
+                        else:
+                            logger.warning(f"未找到MD5为 {image_md5} 的图片")
+                    except Exception as e:
+                        logger.error(f"处理引用图片失败: {e}")
+
+                # 如果没有内容，则使用引用的内容或默认提示
+                if not content or content.strip() == "":
+                    # 如果是图片消息，使用特殊提示
+                    if image_md5 or quoted_msg_type == 3:
+                        processed_query = f"请分析这张图片"
+                    else:
+                        processed_query = f"请回复这条消息: '{quoted_content}'"
+
+                if await self._check_point(bot, message, model):
+                    logger.info(f"XML引用消息使用模型 '{next((name for name, config in self.models.items() if config == model), '未知')}' 处理请求")
+                    await self.dify(bot, message, processed_query, files=files, specific_model=model)
+                    return False
+                else:
+                    logger.info(f"积分检查失败，无法处理XML引用消息请求")
+                    return True
+            else:
+                logger.info("Dify: XML引用消息中没有@机器人，忽略该消息")
+                return True
 
         # 不是引用消息，交给下一个处理器处理
         return True
@@ -2971,3 +3351,77 @@ class Dify(PluginBase):
         except Exception as e:
             logger.error(f"处理文件消息失败: {e}")
             logger.error(traceback.format_exc())
+
+    async def send_quote_message(self, bot: WechatAPIClient, to_wxid: str, content: str, quoted_msg_id: str,
+                              quoted_wxid: str, quoted_nickname: str, quoted_content: str):
+        """
+        发送引用消息
+
+        参数:
+            bot: WechatAPIClient实例
+            to_wxid: 消息接收人的wxid
+            content: 要发送的新消息内容
+            quoted_msg_id: 被引用消息的newMsgId
+            quoted_wxid: 被引用消息发送者的wxid
+            quoted_nickname: 被引用消息发送者的昵称
+            quoted_content: 被引用的消息内容
+        """
+        # 构建引用消息的XML
+        quote_xml = f'''<appmsg appid="" sdkver="0">
+            <title>{content}</title>
+            <des></des>
+            <action></action>
+            <type>57</type>
+            <showtype>0</showtype>
+            <soundtype>0</soundtype>
+            <mediatagname></mediatagname>
+            <messageext></messageext>
+            <messageaction></messageaction>
+            <content></content>
+            <contentattr>0</contentattr>
+            <url></url>
+            <lowurl></lowurl>
+            <dataurl></dataurl>
+            <lowdataurl></lowdataurl>
+            <songalbumurl></songalbumurl>
+            <songlyric></songlyric>
+            <appattach>
+                <totallen>0</totallen>
+                <attachid></attachid>
+                <emoticonmd5></emoticonmd5>
+                <fileext></fileext>
+                <cdnthumbaeskey></cdnthumbaeskey>
+                <aeskey></aeskey>
+            </appattach>
+            <extinfo></extinfo>
+            <sourceusername></sourceusername>
+            <sourcedisplayname></sourcedisplayname>
+            <thumburl></thumburl>
+            <md5></md5>
+            <statextstr></statextstr>
+            <directshare>0</directshare>
+            <refermsg>
+                <type>1</type>
+                <svrid>{quoted_msg_id}</svrid>
+                <fromusr>{quoted_wxid}</fromusr>
+                <chatusr>{bot.wxid}</chatusr>
+                <displayname>{quoted_nickname}</displayname>
+                <content>{quoted_content}</content>
+            </refermsg>
+        </appmsg>'''
+
+        # 压缩XML为单行（去除所有换行和多余空格）
+        quote_xml = quote_xml.replace('\n', '').replace('    ', '')
+
+        # 使用send_app_message发送引用消息
+        # type=57表示这是一个引用消息
+        try:
+            logger.info(f"发送引用消息: 引用MsgId={quoted_msg_id}, 引用人={quoted_nickname}")
+            result = await bot.send_app_message(to_wxid, quote_xml, 57)
+            return result
+        except Exception as e:
+            logger.error(f"发送引用消息失败: {e}")
+            logger.error(traceback.format_exc())
+            # 如果发送引用消息失败，回退到普通消息
+            logger.info("回退到发送普通文本消息")
+            return await bot.send_text_message(to_wxid, content)
