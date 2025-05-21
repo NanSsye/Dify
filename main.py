@@ -63,7 +63,7 @@ class ModelConfig:
 class Dify(PluginBase):
     description = "Dify插件"
     author = "老夏的金库"
-    version = "1.5.1"  # 更新版本号 - 增加图片引用功能
+    version = "1.6.0"  # 更新版本号 - 群友修改
     is_ai_platform = True  # 标记为 AI 平台插件
 
     def __init__(self):
