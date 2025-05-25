@@ -1,19 +1,10 @@
-# ======================================
-# Dify 插件主配置
-# ======================================
 [Dify]
-# 基本设置
-enable = true                   # 是否启用插件
-default-model = "学姐"           # 默认使用的模型
-commands = ["聊天", "AI", "重置对话"]  # 触发命令列表
-
-# 功能设置
-support_agent_mode = true       # 是否支持Agent模式:
-                                # true - 支持Agent模式，可以处理agent_thought、agent_message等事件
-                                # false - 仅支持基础聊天模式
-
-# 用户提示信息
-command-tip = """-----xxxBot-----
+enable = true
+default-model = "学姐"
+commands = [ "聊天", "AI", "重置对话" ]
+support_agent_mode = true
+command-tip = """
+-----xxxBot-----
 💬AI聊天指令：
 1. 切换模型（将会一直保持到下次切换）：
    - @学姐 切换：切换到学姐模型
@@ -23,34 +14,15 @@ command-tip = """-----xxxBot-----
    - 老夏 消息内容：临时使用老夏模型
 3. 重置对话：
    - 重置对话：清除当前对话历史，开始新的对话"""
+admin_ignore = true
+whitelist_ignore = true
+http-proxy = ""
+voice_reply_all = false
+robot-names = [ "毛球", "🥥", "智能助手", "小小x" ]
 
-# 权限与积分设置
-admin_ignore = true             # 管理员是否免积分，设为true则管理员不消耗积分使用AI
-whitelist_ignore = true         # 白名单用户是否免积分，设为true则白名单用户不消耗积分
-
-# 网络与回复设置
-http-proxy = ""                 # HTTP代理配置，格式为"http://代理地址:端口"，不需要则留空
-voice_reply_all = false         # 是否总是使用语音回复，设为true则所有回复都转为语音消息
-
-# 机器人识别
-robot-names = [                 # 用于识别AI名称，在传递到Dify时进行删除
-    "毛球",
-    "🥥",
-    "智能助手",
-    "小小x"
-]
-
-# 注意：音频转文本和文本转音频 URL 将基于各模型的 base-url 自动构建
-
-# ======================================
-# 模型配置
-# ======================================
-[Dify.models]
-
-# 学姐模型配置
 [Dify.models."学姐"]
-api-key = "app-zPoThZ1qVxei3DRVS7k4ZLqN"  # API密钥
-base-url = "http://192.168.6.19:8080/v1"   # API基础URL
-trigger-words = ["@学姐"]                  # 用于切换模型的触发词
-wakeup-words = ["学姐"]                    # 用于唤醒AI的唤醒词
-price = 0                                  # 使用价格（积分）
+api-key = "app-zPoThZ1qVxei3DRVS7k4ZLqN"
+base-url = "http://192.168.6.19:8080/v1"
+trigger-words = [ "@学姐" ]
+wakeup-words = [ "学姐" ]
+price = 0
